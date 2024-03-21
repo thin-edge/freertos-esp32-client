@@ -1,9 +1,9 @@
+# Freertos Esp32 Client for thin-edge.io
+
 This is a thin-edge.io child device client that can run on esp32 microcontrollers. 
 It based on the [ESP-MQTT sample application](https://github.com/espressif/esp-idf/tree/v5.2.1/examples/protocols/mqtt/tcp).
 
 ## Requirements 
-
------
 
 ### Hardware
 
@@ -49,7 +49,6 @@ You can also follow the [Getting Started](https://docs.espressif.com/projects/es
 
 ## Get started
 
-------------
 1. Import project
 
    Clone this repo to your PC, import this project into VS Code. At the bottom of the window you can find the ESP-IDF tools.
@@ -88,7 +87,6 @@ You can also follow the [Getting Started](https://docs.espressif.com/projects/es
 
 
 Usage
----------
 
 1. Send temperature measurements to Cumulocity IoT Platform via thin-edge device
 2. Restart device on Cumulocity IoT Platform
