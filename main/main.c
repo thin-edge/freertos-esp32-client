@@ -29,12 +29,11 @@ char APPLICATION_VERSION[] = "1.1.1";
 char *cmd_topic;
 char *cmd_data;
 char *restart_cmd[20];
-char *restart_topic;
 
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 {
-    
+
     esp_mqtt_client_handle_t client = event->client;
     int msg_id;
     char topic_identifier[] = "te/device/";
@@ -43,9 +42,9 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
     strcat( topic_identifier, "//");
     time_t t;
     srand((unsigned) time(&t));
-   
+
     switch (event->event_id) {
-        case MQTT_EVENT_CONNECTED:    // 
+        case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
             msg_id = esp_mqtt_client_publish(client, topic_identifier, "{\"name\":\"esp32-c-client\",\"type\":\"ESP-IDF\",\"@type\":\"child-device\"}", 0, 1, 0);
             ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
@@ -67,65 +66,51 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             // msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
             // ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
             break;
-        case MQTT_EVENT_DISCONNECTED:    
+        case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
             break;
 
-        case MQTT_EVENT_SUBSCRIBED:    // 
+        case MQTT_EVENT_SUBSCRIBED:
             ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
             // msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
             // ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
             break;
-        case MQTT_EVENT_UNSUBSCRIBED:    
+        case MQTT_EVENT_UNSUBSCRIBED:
             ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
             break;
-        case MQTT_EVENT_PUBLISHED:    
-        //     ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
-        //     printf("Something published.\n");
+        case MQTT_EVENT_PUBLISHED:
+            // ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+            // printf("Something published.\n");
             break;
-        case MQTT_EVENT_DATA:    // 
+        case MQTT_EVENT_DATA:
             ESP_LOGI(TAG, "MQTT_EVENT_DATA");
             printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
             printf("DATA=%.*s\r\n", event->data_len, event->data);
             printf("%d\n", event->data_len);
             printf("%d\n", event->data_len > 0);
             if ((event->data_len) > 0)
-            {   
-                printf("Point_1\n");
+            {
                 if (cmd_topic != NULL)
                 {
-                    printf("Point_2\n");
                     free(cmd_topic);
                     cmd_topic = NULL;
                 }
-                printf("Point_3\n");
                 if (cmd_data != NULL)
                 {
-                    printf("Point_4\n");
                     free(cmd_data);
                     cmd_data = NULL;
                 }
-                printf("Point_5\n");
-                cmd_topic = malloc(event->topic_len);
-                cmd_data = malloc(event->data_len);
-                memcpy(cmd_topic, event->topic, event->topic_len);
-                cmd_topic[event->topic_len] ='\0';
-                memcpy(cmd_data, event->data, event->data_len);
-                cmd_data[event->data_len] ='\0';
+                cmd_topic = strndup(event->topic, event->topic_len);
+                cmd_data = strndup(event->data, event->data_len);
                 printf("%s\n", cmd_topic);
                 printf("%s\n", cmd_data);
-                
+
                 if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "init")!=NULL)
                 {
                     restart_cmd[0] = "init";
-                    restart_topic = NULL;
-                    restart_topic = malloc(event->topic_len);
-                    memcpy(restart_topic, event->topic, event->topic_len);
-                    restart_topic[event->topic_len] ='\0';
-                    // restart_topic = cmd_topic;
                     printf("Got restart request init\n");
                     printf("%s\n", restart_cmd[0]);
-                    printf("%s\n", restart_topic);
+                    printf("%s\n", cmd_topic);
                 }
                 else if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "executing")!=NULL)
                 {
@@ -135,9 +120,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                 }
                 else if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "successful")!=NULL)
                 {
-                    // restart_cmd[2] = "successful";
                     printf("Got restart request successful\n");
-                    // printf("%s\n", restart_cmd[2]);
                 }
             }
             else
@@ -165,8 +148,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_app_start(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = "mqtt://raspberrypi.local",    
-        .broker.address.port = 1883,               
+        .broker.address.uri = "mqtt://raspberrypi.local",
+        .broker.address.port = 1883,
         .session.last_will.topic = "te/device/esp32-c-client///e/disconnected",
         .session.last_will.msg = "{\"text\": \"Disconnected\"}",
         .session.last_will.qos = 1,
@@ -202,7 +185,7 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(client);
 
     while (1)
-    {   
+    {
         int msg_id;
         int temperature = rand() % 100;
         char temp_payload[] = "{\"temp\": ";
@@ -225,7 +208,7 @@ static void mqtt_app_start(void)
             esp_restart();
         }
         else if (restart_cmd[1] != '\0')
-        {   
+        {
             printf("Will create event!!!\n");
             esp_mqtt_client_publish(client, "te/device/esp32-c-client///e/restart","{\"text\": \"Device restarted\"}",0,0,0);
             // ESP_LOGI(TAG, "sent event successful, msg_id=%d", msg_id);
@@ -237,7 +220,7 @@ static void mqtt_app_start(void)
             esp_mqtt_client_publish(client,cmd_topic,"{\"status\": \"successful\"}", 0, 1, 1);
             // ESP_LOGI(TAG, "sent successful successful, msg_id=%d", msg_id);
             printf("sent successful successful.\n");
-            
+
             if (cmd_topic != NULL)
                 {
                     free(cmd_topic);
@@ -245,7 +228,6 @@ static void mqtt_app_start(void)
                 }
             restart_cmd[0] = '\0';
             restart_cmd[1] = '\0';
-            // restart_cmd[2] = '\0';
             printf("cmd 0 %d\n", restart_cmd[0]);
             printf("cmd 1 %d\n", restart_cmd[1]);
             if (cmd_data != NULL)
@@ -258,9 +240,9 @@ static void mqtt_app_start(void)
             printf("Data cleared.");
             sleep(5);
         }
- 
+
     }
-    
+
 }
 
 void app_main(void)
@@ -288,6 +270,5 @@ void app_main(void)
     ESP_ERROR_CHECK(example_connect());
     restart_cmd[0] = '\0';
     restart_cmd[1] = '\0';
-    // restart_cmd[2] = '\0';
     mqtt_app_start();
 }
