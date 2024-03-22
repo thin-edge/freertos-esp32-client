@@ -11,7 +11,7 @@
 #include "esp_netif.h"
 #include "esp_mac.h"
 #include "protocol_examples_common.h"
-
+#include "mdns.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,6 +32,11 @@ char TOPIC_ID[256] = {0};
 char *cmd_topic;
 char *cmd_data;
 char *restart_cmd[20];
+
+struct Server{
+    uint16_t port;
+    char *host;
+};
 
 /* 
     Set the device identify and topic identifier.
@@ -64,6 +69,78 @@ int publish_mqtt_message(esp_mqtt_client_handle_t client, const char *topic, con
 void build_mqtt_topic(char *dst, char *topic) {
     strcat(dst, TOPIC_ID);
     strcat(dst, topic);
+}
+
+/*
+    thin-edge.io service discovery
+*/
+static const char *ip_protocol_str[] = {"V4", "V6", "MAX"};
+
+static mdns_result_t* mdns_find_match(mdns_result_t *results, char *pattern) {
+    mdns_result_t *r = results;
+    mdns_ip_addr_t *a = NULL;
+    int i = 1, t;
+    while (r) {
+        if (r->esp_netif) {
+            printf("%d: Interface: %s, Type: %s, TTL: %" PRIu32 "\n", i++, esp_netif_get_ifkey(r->esp_netif),
+                   ip_protocol_str[r->ip_protocol], r->ttl);
+        }
+        if (r->instance_name) {
+            printf("  PTR : %s.%s.%s\n", r->instance_name, r->service_type, r->proto);
+        }
+        if (r->hostname) {
+            printf("  SRV : %s.local:%u\n", r->hostname, r->port);
+        }
+        if (r->txt_count) {
+            printf("  TXT : [%zu] ", r->txt_count);
+            for (t = 0; t < r->txt_count; t++) {
+                printf("%s=%s(%d); ", r->txt[t].key, r->txt[t].value ? r->txt[t].value : "NULL", r->txt_value_len[t]);
+            }
+            printf("\n");
+        }
+        a = r->addr;
+        while (a) {
+            if (a->addr.type == ESP_IPADDR_TYPE_V6) {
+                printf("  AAAA: " IPV6STR "\n", IPV62STR(a->addr.u_addr.ip6));
+            } else {
+                printf("  A   : " IPSTR "\n", IP2STR(&(a->addr.u_addr.ip4)));
+            }
+            a = a->next;
+        }
+
+        if (r != NULL && pattern != NULL && strstr(r->hostname, pattern) != NULL) {
+            ESP_LOGI(TAG, "Selecting first match. host=%s, port=%d", r->hostname, r->port);
+            return r;
+        }
+
+        r = r->next;
+    }
+    return NULL;
+}
+
+void discover_tedge_broker(struct Server *server, const char *service_name, const char *proto, char *pattern) {
+    ESP_LOGI(TAG, "Query PTR: %s.%s.local", service_name, proto);
+
+    mdns_result_t *results = NULL;
+    esp_err_t err = mdns_query_ptr(service_name, proto, 3000, 20,  &results);
+    if (err) {
+        ESP_LOGE(TAG, "Query Failed: %s", esp_err_to_name(err));
+        return;
+    }
+    if (!results) {
+        ESP_LOGW(TAG, "No results found!");
+        return;
+    }
+
+    mdns_result_t *match = mdns_find_match(results, pattern);
+    if (match != NULL) {
+        server->port = match->port;
+        char host_url[256] = {0};
+        sprintf(host_url, "mqtt://%s.local", match->hostname);
+        server->host = strdup(host_url);
+        ESP_LOGI(TAG, "Found matching service. host=%s, port=%d", server->host, server->port);
+    }
+    mdns_query_results_free(results);
 }
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
@@ -178,10 +255,37 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 static void mqtt_app_start(void)
 {
+    // Use mdns to discover which local thin-edge.io to connect to
+    ESP_ERROR_CHECK( mdns_init() );
+
+    set_device_id(DEVICE_ID, TOPIC_ID);
+    ESP_LOGI(TAG, "Device id: %s", DEVICE_ID);
+    ESP_LOGI(TAG, "Topic id: %s", TOPIC_ID);
+
+    struct Server server = {
+        .port = 1883,
+    };
+
+    // Retry forever waiting for a valid thin-edge.io instance is found
+    // TODO: Can the detect setting be stored somewhere to avoid having to
+    // scan on every startup
+    while (server.host == NULL) {
+        discover_tedge_broker(&server, "_thin-edge_mqtt", "_tcp", "rpi5-d83add9f145a");
+        if (server.host != NULL) {
+            ESP_LOGI(TAG, "Using thin-edge.io. host=%s, port=%d", server.host, server.port);
+        } else {
+            ESP_LOGE(TAG, "Could not find a thin-edge.io MQTT Broker. Retrying in 10 seconds");
+            sleep(10);
+        }
+    }
+
+    char last_will_topic[256] = {0};
+    build_mqtt_topic(last_will_topic, "/e/disconnected");
+
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = "mqtt://raspberrypi.local",
-        .broker.address.port = 1883,
-        .session.last_will.topic = "te/device/esp32-c-client///e/disconnected",
+        .broker.address.uri = server.host,
+        .broker.address.port = server.port,
+        .session.last_will.topic = last_will_topic,
         .session.last_will.msg = "{\"text\": \"Disconnected\"}",
         .session.last_will.qos = 1,
         .session.last_will.retain = false
@@ -211,9 +315,6 @@ static void mqtt_app_start(void)
     }
 #endif /* CONFIG_BROKER_URL_FROM_STDIN */
 
-    set_device_id(DEVICE_ID, TOPIC_ID);
-    ESP_LOGI(TAG, "Device id: %s", DEVICE_ID);
-    ESP_LOGI(TAG, "Topic id: %s", TOPIC_ID);
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
