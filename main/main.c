@@ -29,7 +29,6 @@ char APPLICATION_VERSION[] = "1.1.1";
 char *cmd_topic;
 char *cmd_data;
 char *restart_cmd[20];
-char *restart_topic;
 
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
@@ -113,10 +112,6 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                 if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "init")!=NULL)
                 {
                     restart_cmd[0] = "init";
-                    restart_topic = NULL;
-                    restart_topic = malloc(event->topic_len);
-                    memcpy(restart_topic, event->topic, event->topic_len);
-                    restart_topic[event->topic_len] ='\0';
                     printf("Got restart request init\n");
                     printf("%s\n", restart_cmd[0]);
                     printf("%s\n", cmd_topic);
