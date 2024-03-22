@@ -101,7 +101,6 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                     free(cmd_data);
                     cmd_data = NULL;
                 }
-                printf("Point_5\n");
                 cmd_topic = malloc(event->topic_len);
                 cmd_data = malloc(event->data_len);
                 memcpy(cmd_topic, event->topic, event->topic_len);
@@ -118,10 +117,9 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                     restart_topic = malloc(event->topic_len);
                     memcpy(restart_topic, event->topic, event->topic_len);
                     restart_topic[event->topic_len] ='\0';
-                    // restart_topic = cmd_topic;
                     printf("Got restart request init\n");
                     printf("%s\n", restart_cmd[0]);
-                    printf("%s\n", restart_topic);
+                    printf("%s\n", cmd_topic);
                 }
                 else if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "executing")!=NULL)
                 {
