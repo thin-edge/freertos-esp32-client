@@ -100,12 +100,8 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                     free(cmd_data);
                     cmd_data = NULL;
                 }
-                cmd_topic = malloc(event->topic_len);
-                cmd_data = malloc(event->data_len);
-                memcpy(cmd_topic, event->topic, event->topic_len);
-                cmd_topic[event->topic_len] ='\0';
-                memcpy(cmd_data, event->data, event->data_len);
-                cmd_data[event->data_len] ='\0';
+                cmd_topic = strndup(event->topic, event->topic_len);
+                cmd_data = strndup(event->data, event->data_len);
                 printf("%s\n", cmd_topic);
                 printf("%s\n", cmd_data);
 
