@@ -13,7 +13,7 @@ It based on the [ESP-MQTT sample application](https://github.com/espressif/esp-i
 
 ### Setting up the thin-edge.io device
 
-Since the ESP32 boadr needs to communicate with thin-edge.io over the network, the thin-edge.io instance needs to be setup to enable this communication.
+Since the ESP32 board needs to communicate with thin-edge.io over the network, the thin-edge.io instance needs to be setup to enable this communication.
 
 1. On the main device where the MQTT broker, tedge-mapper-c8y and tedge-agent, run the following commands to set the configuration:
 
@@ -71,19 +71,25 @@ You can also follow the [Getting Started](https://docs.espressif.com/projects/es
    Open EDF-IDF: SDK Configuration Editor. Under 'Example Connection Configuration' set Wi-Fi SSID and password 
    
    :warning: May need to repeat step 2-4 when you reopen VS Code
-5. Set MQTT Broker URI
-   Open main.c, set the MQTT Broker URI on line 180. Use the IP address of Raspberry Pi
-6. Optional: change device ID
-   You can change the device id. If you do so,do not forget change the device id in topics as well.
-   
-   :construction: Todo: Remove hardcoded topics
-7. Build image
-8. Select Flash Method
+5. Build image
+6. Select Flash Method
 
    For USB: UART
-9. Flash Device
+7. Flash Device
    Connect ESP32 Board to the PC, then flash device.
-10. Optional: monitor device
+8. Optional: monitor device
+
+## Troubleshooting
+
+### Microcontroller does not discover a valid thin-edge.io instance
+
+If you the microcontroller does not detect a thin-edge.io instance anywhere, then you are probably not using a thin-edge.io built using either [Rugpi](https://thin-edge.github.io/thin-edge.io/extend/firmware-management/building-image/rugpi/) or [Yocto](https://thin-edge.github.io/thin-edge.io/extend/firmware-management/building-image/yocto/), as these images will install an avahi service will make thin-edge.io auto discoverable to other devices in the local network.
+
+If you can't use on of the above images, then you can manually control which thin-edge.io the microcontroller will connect to by configuring the `MANUAL_MQTT_HOST` variable in the [main/main.c](main/main.c) file.
+
+```c
+const char *MANUAL_MQTT_HOST = "my-rpi-host";
+```
 
 
 Usage
@@ -94,4 +100,13 @@ Usage
    :construction: A restart command actually triggers two times of restarts. Maintenance in progress
 3. Create an alarm before restart
 4. Create an event after restart
+
+### Building does not pull in the correct dependencies
+
+If you encounter a build problem about some missing dependencies, e.g. `mdns.h`, then you may need to reconfigure the project to force idf to download the missing dependency. You can do this by running the following commands:
+
+```sh
+idf.py reconfigure
+idf.py build
+```
 
