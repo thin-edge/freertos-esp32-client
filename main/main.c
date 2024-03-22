@@ -11,7 +11,9 @@
 #include "esp_netif.h"
 #include "esp_mac.h"
 #include "protocol_examples_common.h"
-
+#include "mdns.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -25,13 +27,40 @@
 #include "esp_log.h"
 #include "mqtt_client.h"
 
+#define STORAGE_NAMESPACE "storage"
+#define CONFIG_MQTT_HOST "mqtt_host"
+#define CONFIG_MQTT_PORT "mqtt_port"
+
 static const char *TAG = "TEDGE";
 char APPLICATION_VERSION[] = "1.1.1";
+
+//
+// Discover settings
+//
+// Manually set the host (only recommended if you are not running thin-edge.io with mdns enabled)
+const char *MANUAL_MQTT_HOST = NULL;
+
+// Match the first service matching the given pattern
+const char *MDNS_DISCOVER_PATTERN = NULL;
+
+//
+// Persistence
+//
+// Enable/disable reading and saving settings to persistent storage (NVM flash)
+bool READ_FROM_NVM = true;
+bool SAVE_TO_NVM = true;
+
+// Internal
 char DEVICE_ID[32] = {0};
 char TOPIC_ID[256] = {0};
 char *cmd_topic;
 char *cmd_data;
 char *restart_cmd[20];
+
+struct Server{
+    uint16_t port;
+    char *host;
+};
 
 /* 
     Set the device identify and topic identifier.
@@ -64,6 +93,147 @@ int publish_mqtt_message(esp_mqtt_client_handle_t client, const char *topic, con
 void build_mqtt_topic(char *dst, char *topic) {
     strcat(dst, TOPIC_ID);
     strcat(dst, topic);
+}
+
+/*
+    thin-edge.io service discovery which uses mdns to find the thin-edge.io MQTT broker in the local network
+*/
+static const char *ip_protocol_str[] = {"V4", "V6", "MAX"};
+
+static mdns_result_t* mdns_find_match(mdns_result_t *results, char *pattern) {
+    mdns_result_t *r = results;
+    mdns_ip_addr_t *a = NULL;
+    int i = 1, t;
+    while (r) {
+        if (r->esp_netif) {
+            printf("%d: Interface: %s, Type: %s, TTL: %" PRIu32 "\n", i++, esp_netif_get_ifkey(r->esp_netif),
+                   ip_protocol_str[r->ip_protocol], r->ttl);
+        }
+        if (r->instance_name) {
+            printf("  PTR : %s.%s.%s\n", r->instance_name, r->service_type, r->proto);
+        }
+        if (r->hostname) {
+            printf("  SRV : %s.local:%u\n", r->hostname, r->port);
+        }
+        if (r->txt_count) {
+            printf("  TXT : [%zu] ", r->txt_count);
+            for (t = 0; t < r->txt_count; t++) {
+                printf("%s=%s(%d); ", r->txt[t].key, r->txt[t].value ? r->txt[t].value : "NULL", r->txt_value_len[t]);
+            }
+            printf("\n");
+        }
+        a = r->addr;
+        while (a) {
+            if (a->addr.type == ESP_IPADDR_TYPE_V6) {
+                printf("  AAAA: " IPV6STR "\n", IPV62STR(a->addr.u_addr.ip6));
+            } else {
+                printf("  A   : " IPSTR "\n", IP2STR(&(a->addr.u_addr.ip4)));
+            }
+            a = a->next;
+        }
+
+        if (r != NULL && pattern != NULL && strstr(r->hostname, pattern) != NULL) {
+            ESP_LOGI(TAG, "Selecting first match. host=%s, port=%d", r->hostname, r->port);
+            return r;
+        }
+
+        r = r->next;
+    }
+    return NULL;
+}
+
+void discover_tedge_broker(struct Server *server, const char *service_name, const char *proto, char *pattern) {
+    ESP_LOGI(TAG, "Query PTR: %s.%s.local", service_name, proto);
+
+    mdns_result_t *results = NULL;
+    esp_err_t err = mdns_query_ptr(service_name, proto, 3000, 20,  &results);
+    if (err) {
+        ESP_LOGE(TAG, "Query Failed: %s", esp_err_to_name(err));
+        return;
+    }
+    if (!results) {
+        ESP_LOGW(TAG, "No results found!");
+        return;
+    }
+
+    mdns_result_t *match = mdns_find_match(results, pattern);
+    if (match != NULL) {
+        server->port = match->port;
+        char host_url[256] = {0};
+        sprintf(host_url, "mqtt://%s.local", match->hostname);
+        server->host = strdup(host_url);
+        ESP_LOGI(TAG, "Found matching service. host=%s, port=%d", server->host, server->port);
+    }
+    mdns_query_results_free(results);
+}
+
+/*
+    Read settings from NVM flash
+ */
+esp_err_t read_settings(struct Server *mqtt_server)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+
+    // Open
+    err = nvs_open(STORAGE_NAMESPACE, NVS_READONLY, &my_handle);
+    if (err != ESP_OK) return err;
+
+    // Read
+    char *host = calloc(256, sizeof(char));
+    size_t size = 256;
+    err = nvs_get_str(my_handle, CONFIG_MQTT_HOST, host, &size);
+    if (err == ESP_OK) {
+        mqtt_server->host = host;
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        free(host);
+    } else if (err != ESP_OK) {
+        free(host);
+        return err;
+    }
+
+    u_int16_t port = 0;
+    err = nvs_get_u16(my_handle, CONFIG_MQTT_PORT, &port);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        mqtt_server->port = port;
+    } else if (err != ESP_OK) {
+        return err;
+    }
+    
+    // Close
+    nvs_close(my_handle);
+    return ESP_OK;
+}
+
+
+/*
+    Persist settings to NVM flash
+*/
+esp_err_t save_settings(struct Server *mqtt_server)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+
+    // Open
+    err = nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_str(my_handle, CONFIG_MQTT_HOST, mqtt_server->host);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_u16(my_handle, CONFIG_MQTT_PORT, mqtt_server->port);
+    if (err != ESP_OK) return err;
+
+    // Commit written value.
+    // After setting any values, nvs_commit() must be called to ensure changes are written
+    // to flash storage. Implementations may write to storage at other times,
+    // but this is not guaranteed.
+    err = nvs_commit(my_handle);
+    if (err != ESP_OK) return err;
+
+    // Close
+    nvs_close(my_handle);
+    return ESP_OK;
 }
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
@@ -178,10 +348,62 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 static void mqtt_app_start(void)
 {
+    // Use mdns to discover which local thin-edge.io to connect to
+    ESP_ERROR_CHECK(mdns_init());
+
+    set_device_id(DEVICE_ID, TOPIC_ID);
+    ESP_LOGI(TAG, "Device id: %s", DEVICE_ID);
+    ESP_LOGI(TAG, "Topic id: %s", TOPIC_ID);
+
+    struct Server server = {
+        .port = 1883,
+    };
+
+    if (MANUAL_MQTT_HOST != NULL) {
+        ESP_LOGI(TAG, "Using manual mqtt host. server=%s", MANUAL_MQTT_HOST);
+        server.host = MANUAL_MQTT_HOST;
+    }
+
+    if (READ_FROM_NVM) {
+        ESP_LOGI(TAG, "Reading settings from NVM flash");
+        err_enum_t err = read_settings(&server);
+        if (err == ERR_OK) {
+            if (server.host != NULL) {
+                ESP_LOGI(TAG, "Read settings from NVM flash. server=%s, port=%d", server.host, server.port);
+            } else {
+                ESP_LOGW(TAG, "Server host is empty");
+            }
+        } else {
+            ESP_LOGW(TAG, "Failed to read settings from NVM flash. err=%s", esp_err_to_name(err));
+        }
+    }
+
+    // Retry forever waiting for a valid thin-edge.io instance is found
+    while (server.host == NULL) {
+        discover_tedge_broker(&server, "_thin-edge_mqtt", "_tcp", MDNS_DISCOVER_PATTERN);
+        if (server.host != NULL) {
+            ESP_LOGI(TAG, "Using thin-edge.io. host=%s, port=%d", server.host, server.port);
+
+            if (SAVE_TO_NVM) {
+                ESP_LOGI(TAG, "Saving settings to NVM flash");
+                esp_err_t err = save_settings(&server);
+                if (err != ERR_OK) {
+                    ESP_LOGW(TAG, "Failed to save settings to NVM flash. err=%s", esp_err_to_name(err));
+                }
+            }
+        } else {
+            ESP_LOGE(TAG, "Could not find a thin-edge.io MQTT Broker. Retrying in 10 seconds");
+            sleep(10);
+        }
+    }
+
+    char last_will_topic[256] = {0};
+    build_mqtt_topic(last_will_topic, "/e/disconnected");
+
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = "mqtt://raspberrypi.local",
-        .broker.address.port = 1883,
-        .session.last_will.topic = "te/device/esp32-c-client///e/disconnected",
+        .broker.address.uri = server.host,
+        .broker.address.port = server.port,
+        .session.last_will.topic = last_will_topic,
         .session.last_will.msg = "{\"text\": \"Disconnected\"}",
         .session.last_will.qos = 1,
         .session.last_will.retain = false
@@ -211,9 +433,6 @@ static void mqtt_app_start(void)
     }
 #endif /* CONFIG_BROKER_URL_FROM_STDIN */
 
-    set_device_id(DEVICE_ID, TOPIC_ID);
-    ESP_LOGI(TAG, "Device id: %s", DEVICE_ID);
-    ESP_LOGI(TAG, "Topic id: %s", TOPIC_ID);
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
