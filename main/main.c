@@ -12,6 +12,8 @@
 #include "esp_mac.h"
 #include "protocol_examples_common.h"
 #include "mdns.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -25,8 +27,30 @@
 #include "esp_log.h"
 #include "mqtt_client.h"
 
+#define STORAGE_NAMESPACE "storage"
+#define CONFIG_MQTT_HOST "mqtt_host"
+#define CONFIG_MQTT_PORT "mqtt_port"
+
 static const char *TAG = "TEDGE";
 char APPLICATION_VERSION[] = "1.1.1";
+
+//
+// Discover settings
+//
+// Manually set the host (only recommended if you are not running thin-edge.io with mdns enabled)
+const char *MANUAL_MQTT_HOST = NULL;
+
+// Match the first service matching the given pattern
+const char *MDNS_DISCOVER_PATTERN = NULL;
+
+//
+// Persistence
+//
+// Enable/disable reading and saving settings to persistent storage (NVM flash)
+bool READ_FROM_NVM = true;
+bool SAVE_TO_NVM = true;
+
+// Internal
 char DEVICE_ID[32] = {0};
 char TOPIC_ID[256] = {0};
 char *cmd_topic;
@@ -72,7 +96,7 @@ void build_mqtt_topic(char *dst, char *topic) {
 }
 
 /*
-    thin-edge.io service discovery
+    thin-edge.io service discovery which uses mdns to find the thin-edge.io MQTT broker in the local network
 */
 static const char *ip_protocol_str[] = {"V4", "V6", "MAX"};
 
@@ -141,6 +165,75 @@ void discover_tedge_broker(struct Server *server, const char *service_name, cons
         ESP_LOGI(TAG, "Found matching service. host=%s, port=%d", server->host, server->port);
     }
     mdns_query_results_free(results);
+}
+
+/*
+    Read settings from NVM flash
+ */
+esp_err_t read_settings(struct Server *mqtt_server)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+
+    // Open
+    err = nvs_open(STORAGE_NAMESPACE, NVS_READONLY, &my_handle);
+    if (err != ESP_OK) return err;
+
+    // Read
+    char *host = calloc(256, sizeof(char));
+    size_t size = 256;
+    err = nvs_get_str(my_handle, CONFIG_MQTT_HOST, host, &size);
+    if (err == ESP_OK) {
+        mqtt_server->host = host;
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        free(host);
+    } else if (err != ESP_OK) {
+        free(host);
+        return err;
+    }
+
+    u_int16_t port = 0;
+    err = nvs_get_u16(my_handle, CONFIG_MQTT_PORT, &port);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        mqtt_server->port = port;
+    } else if (err != ESP_OK) {
+        return err;
+    }
+    
+    // Close
+    nvs_close(my_handle);
+    return ESP_OK;
+}
+
+
+/*
+    Persist settings to NVM flash
+*/
+esp_err_t save_settings(struct Server *mqtt_server)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err;
+
+    // Open
+    err = nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_str(my_handle, CONFIG_MQTT_HOST, mqtt_server->host);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_u16(my_handle, CONFIG_MQTT_PORT, mqtt_server->port);
+    if (err != ESP_OK) return err;
+
+    // Commit written value.
+    // After setting any values, nvs_commit() must be called to ensure changes are written
+    // to flash storage. Implementations may write to storage at other times,
+    // but this is not guaranteed.
+    err = nvs_commit(my_handle);
+    if (err != ESP_OK) return err;
+
+    // Close
+    nvs_close(my_handle);
+    return ESP_OK;
 }
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
@@ -256,7 +349,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_app_start(void)
 {
     // Use mdns to discover which local thin-edge.io to connect to
-    ESP_ERROR_CHECK( mdns_init() );
+    ESP_ERROR_CHECK(mdns_init());
 
     set_device_id(DEVICE_ID, TOPIC_ID);
     ESP_LOGI(TAG, "Device id: %s", DEVICE_ID);
@@ -266,13 +359,38 @@ static void mqtt_app_start(void)
         .port = 1883,
     };
 
+    if (MANUAL_MQTT_HOST != NULL) {
+        ESP_LOGI(TAG, "Using manual mqtt host. server=%s", MANUAL_MQTT_HOST);
+        server.host = MANUAL_MQTT_HOST;
+    }
+
+    if (READ_FROM_NVM) {
+        ESP_LOGI(TAG, "Reading settings from NVM flash");
+        err_enum_t err = read_settings(&server);
+        if (err == ERR_OK) {
+            if (server.host != NULL) {
+                ESP_LOGI(TAG, "Read settings from NVM flash. server=%s, port=%d", server.host, server.port);
+            } else {
+                ESP_LOGW(TAG, "Server host is empty");
+            }
+        } else {
+            ESP_LOGW(TAG, "Failed to read settings from NVM flash. err=%s", esp_err_to_name(err));
+        }
+    }
+
     // Retry forever waiting for a valid thin-edge.io instance is found
-    // TODO: Can the detect setting be stored somewhere to avoid having to
-    // scan on every startup
     while (server.host == NULL) {
-        discover_tedge_broker(&server, "_thin-edge_mqtt", "_tcp", "rpi5-d83add9f145a");
+        discover_tedge_broker(&server, "_thin-edge_mqtt", "_tcp", MDNS_DISCOVER_PATTERN);
         if (server.host != NULL) {
             ESP_LOGI(TAG, "Using thin-edge.io. host=%s, port=%d", server.host, server.port);
+
+            if (SAVE_TO_NVM) {
+                ESP_LOGI(TAG, "Saving settings to NVM flash");
+                esp_err_t err = save_settings(&server);
+                if (err != ERR_OK) {
+                    ESP_LOGW(TAG, "Failed to save settings to NVM flash. err=%s", esp_err_to_name(err));
+                }
+            }
         } else {
             ESP_LOGE(TAG, "Could not find a thin-edge.io MQTT Broker. Retrying in 10 seconds");
             sleep(10);
