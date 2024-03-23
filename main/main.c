@@ -129,7 +129,7 @@ void build_mqtt_topic(char *dst, char *topic) {
 */
 static const char *ip_protocol_str[] = {"V4", "V6", "MAX"};
 
-static mdns_result_t* mdns_find_match(mdns_result_t *results, char *pattern) {
+static mdns_result_t* mdns_find_match(mdns_result_t *results, const char *pattern) {
     mdns_result_t *r = results;
     mdns_ip_addr_t *a = NULL;
     int i = 1, t;
@@ -171,7 +171,7 @@ static mdns_result_t* mdns_find_match(mdns_result_t *results, char *pattern) {
     return NULL;
 }
 
-void discover_tedge_broker(struct Server *server, const char *service_name, const char *proto, char *pattern) {
+void discover_tedge_broker(struct Server *server, const char *service_name, const char *proto, const char *pattern) {
     ESP_LOGI(TAG, "Query PTR: %s.%s.local", service_name, proto);
 
     mdns_result_t *results = NULL;
@@ -390,7 +390,7 @@ static void mqtt_app_start(void)
 
     if (MANUAL_MQTT_HOST != NULL) {
         ESP_LOGI(TAG, "Using manual mqtt host. server=%s", MANUAL_MQTT_HOST);
-        server.host = MANUAL_MQTT_HOST;
+        server.host = strdup(MANUAL_MQTT_HOST);
     }
 
     if (READ_FROM_NVM) {
