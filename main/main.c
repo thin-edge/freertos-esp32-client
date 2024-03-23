@@ -55,12 +55,41 @@ char DEVICE_ID[32] = {0};
 char TOPIC_ID[256] = {0};
 char *cmd_topic;
 char *cmd_data;
-char *restart_cmd[20];
 
 struct Server{
     uint16_t port;
     char *host;
 };
+
+typedef enum {
+    OPSTATE_NONE = 0,
+    OPSTATE_INIT = 1,
+    OPSTATE_EXECUTING = 2,
+    OPSTATE_SUCCESSFUL = 3,
+    OPSTATE_FAILED = 4,
+} operation_state_t;
+
+// Current operation state
+operation_state_t OPERATION_STATE = OPSTATE_NONE;
+
+/*
+    Convert operation state to a string to a human readable format
+*/
+const char *tedge_operation_state_to_name(operation_state_t code) {
+    switch (code) {
+    case OPSTATE_NONE:
+        return "NONE";
+    case OPSTATE_INIT:
+        return "INIT";
+    case OPSTATE_EXECUTING:
+        return "EXECUTING";
+    case OPSTATE_SUCCESSFUL:
+        return "SUCCESSFUL";
+    case OPSTATE_FAILED:
+        return "FAILED";
+    }
+    return "NONE";
+}
 
 /* 
     Set the device identify and topic identifier.
@@ -311,12 +340,12 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 
                 if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "init")!=NULL)
                 {
-                    restart_cmd[0] = "init";
+                    OPERATION_STATE = OPSTATE_INIT;
                     ESP_LOGI(TAG, "Got restart request init");
                 }
                 else if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "executing")!=NULL)
                 {
-                    restart_cmd[1] = "executing";
+                    OPERATION_STATE = OPSTATE_EXECUTING;
                     ESP_LOGI(TAG, "Got restart request executing");
                 }
                 else if (strstr(cmd_topic, "cmd/restart")!=NULL && strstr(cmd_data, "successful")!=NULL)
@@ -450,20 +479,23 @@ static void mqtt_app_start(void)
         publish_mqtt_message(client, "/m/environment", temp_payload, 0, 0, 0);
         sleep(5);
 
-        if ((restart_cmd[0] != '\0') && (restart_cmd[1] == '\0'))
+        if (OPERATION_STATE != OPSTATE_NONE)
+        {
+            ESP_LOGI(TAG, "operation state: %s", tedge_operation_state_to_name(OPERATION_STATE));
+        }
+        if (OPERATION_STATE == OPSTATE_INIT)
         {
             publish_mqtt_message(client, "/a/restart", "{\"text\": \"Device will be restarted\",\"severity\": \"critical\"}", 0, 1, 1);
             publish_mqtt_message(client, cmd_topic, "{\"status\": \"executing\"}", 0, 1, 1);
             sleep(5);
             esp_restart();
         }
-        else if (restart_cmd[1] != '\0')
+        else if (OPERATION_STATE == OPSTATE_EXECUTING)
         {
             ESP_LOGI(TAG, "Will create event!!!");
             publish_mqtt_message(client, "/e/restart","{\"text\": \"Device restarted\"}", 0, 0, 0);
             publish_mqtt_message(client, "/a/restart", "", 0, 2, 1);
             sleep(3);
-            ESP_LOGI(TAG, "%s", restart_cmd[1]);
             publish_mqtt_message(client, cmd_topic, "{\"status\": \"successful\"}", 0, 1, 1);
             ESP_LOGI(TAG, "sent successful successful");
 
@@ -472,10 +504,7 @@ static void mqtt_app_start(void)
                     free(cmd_topic);
                     cmd_topic = NULL;
                 }
-            restart_cmd[0] = '\0';
-            restart_cmd[1] = '\0';
-            ESP_LOGI(TAG, "cmd 0 %d", restart_cmd[0]);
-            ESP_LOGI(TAG, "cmd 1 %d", restart_cmd[1]);
+            OPERATION_STATE = OPSTATE_NONE;
             if (cmd_data != NULL)
                 {
                     free(cmd_data);
@@ -484,9 +513,7 @@ static void mqtt_app_start(void)
             ESP_LOGI(TAG, "Data cleared.");
             sleep(5);
         }
-
     }
-
 }
 
 void app_main(void)
@@ -512,7 +539,5 @@ void app_main(void)
      * examples/protocols/README.md for more information about this function.
      */
     ESP_ERROR_CHECK(example_connect());
-    restart_cmd[0] = '\0';
-    restart_cmd[1] = '\0';
     mqtt_app_start();
 }
