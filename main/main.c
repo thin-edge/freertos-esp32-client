@@ -34,17 +34,14 @@
 
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
-#include "tedge_ota.h"
 
 #define STORAGE_NAMESPACE "storage"
 #define CONFIG_MQTT_HOST "mqtt_host"
 #define CONFIG_MQTT_PORT "mqtt_port"
 
-#define CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-
 static const char *TAG = "TEDGE";
 char APPLICATION_NAME[] = "freertos-esp32-tedge";
-char APPLICATION_VERSION[] = "1.1.1";
+char APPLICATION_VERSION[] = "1.1.0";
 
 //
 // Discover settings
@@ -68,8 +65,8 @@ char TOPIC_ID[256] = {0};
 
 typedef struct Server
 {
-    uint16_t port;
-    char *host;
+    uint16_t mqtt_port;
+    char *mqtt_host;
 } app_server_t;
 
 tedge_command_t command;
@@ -118,10 +115,6 @@ int publish_mqtt_json(esp_mqtt_client_handle_t client, const char *topic, cJSON 
     return msg_id;
 }
 
-void start_ota_update(void) {
-    // xTaskCreate(&advanced_ota_example_task, "advanced_ota_example_task", 1024 * 8, NULL, 5, NULL);
-}
-
 /*
     Build mqtt topic using the device's topic identifier and the give partial topic
 */
@@ -129,6 +122,32 @@ void build_mqtt_topic(char *dst, char *topic)
 {
     strcat(dst, TOPIC_ID);
     strcat(dst, topic);
+}
+
+esp_err_t do_firmware_upgrade(char *url)
+{
+    ESP_LOGI(TAG, "Configuring OTA client. url=%s", url);
+    esp_http_client_config_t config = {
+        .url = url,
+        .skip_cert_common_name_check = true,
+        // .transport_type = HTTP_TRANSPORT_OVER_TCP,
+        // .cert_pem = (char *)server_cert_pem_start,
+    };
+    esp_https_ota_config_t ota_config = {
+        .http_config = &config,
+    };
+    ESP_LOGI(TAG, "Starting OTA update");
+    esp_err_t ret = esp_https_ota(&ota_config);
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(TAG, "Firmware downloaded successfully. Restarting now");
+        esp_restart();
+    }
+    else
+    {
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 /*
@@ -210,11 +229,11 @@ void discover_tedge_broker(app_server_t *server, const char *service_name, const
     mdns_result_t *match = mdns_find_match(results, pattern);
     if (match != NULL)
     {
-        server->port = match->port;
-        char host_url[256] = {0};
-        sprintf(host_url, "mqtt://%s.local", match->hostname);
-        server->host = strdup(host_url);
-        ESP_LOGI(TAG, "Found matching service. host=%s, port=%d", server->host, server->port);
+        server->mqtt_port = match->port;
+        char mqtt_host[256] = {0};
+        sprintf(mqtt_host, "mqtt://%s.local", match->hostname);
+        server->mqtt_host = strdup(mqtt_host);
+        ESP_LOGI(TAG, "Found matching service. mqtt=%s:%d", server->mqtt_host, server->mqtt_port);
     }
     mdns_query_results_free(results);
 }
@@ -238,7 +257,7 @@ esp_err_t read_settings(app_server_t *mqtt_server)
     err = nvs_get_str(my_handle, CONFIG_MQTT_HOST, host, &size);
     if (err == ESP_OK)
     {
-        mqtt_server->host = host;
+        mqtt_server->mqtt_host = host;
     }
     else if (err == ESP_ERR_NVS_NOT_FOUND)
     {
@@ -254,7 +273,7 @@ esp_err_t read_settings(app_server_t *mqtt_server)
     err = nvs_get_u16(my_handle, CONFIG_MQTT_PORT, &port);
     if (err == ESP_ERR_NVS_NOT_FOUND)
     {
-        mqtt_server->port = port;
+        mqtt_server->mqtt_port = port;
     }
     else if (err != ESP_OK)
     {
@@ -279,11 +298,11 @@ esp_err_t save_settings(app_server_t *mqtt_server)
     if (err != ESP_OK)
         return err;
 
-    err = nvs_set_str(my_handle, CONFIG_MQTT_HOST, mqtt_server->host);
+    err = nvs_set_str(my_handle, CONFIG_MQTT_HOST, mqtt_server->mqtt_host);
     if (err != ESP_OK)
         return err;
 
-    err = nvs_set_u16(my_handle, CONFIG_MQTT_PORT, mqtt_server->port);
+    err = nvs_set_u16(my_handle, CONFIG_MQTT_PORT, mqtt_server->mqtt_port);
     if (err != ESP_OK)
         return err;
 
@@ -364,6 +383,9 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         break;
     case MQTT_EVENT_PUBLISHED:
         break;
+    case MQTT_EVENT_BEFORE_CONNECT:
+        ESP_LOGI(TAG, "MQTT_EVENT_BEFORE_CONNECT");
+        break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
         ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
@@ -384,10 +406,13 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         {
             if (command.op_type == TEDGE_COMMAND_NONE)
             {
-                // New operation and none are in progress
-                set_current_command(&command, event, op_type, op_status, root);
-                tedge_command_print(&command);
-                root = NULL;
+                if (op_type == TEDGE_COMMAND_FIRMWARE_UPDATE || op_type == TEDGE_COMMAND_RESTART)
+                {
+                    // New operation and none are in progress
+                    set_current_command(&command, event, op_type, op_status, root);
+                    tedge_command_print(&command);
+                    root = NULL;
+                }
             }
             else
             {
@@ -405,12 +430,28 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                 tedge_command_print(&command);
                 root = NULL;
             }
-            else if (op_type == TEDGE_COMMAND_FIRMWARE_UPDATE && op_status == TEDGE_COMMAND_STATUS_EXECUTING)
+            else if (op_type == TEDGE_COMMAND_FIRMWARE_UPDATE)
             {
-                ESP_LOGI(TAG, "Resuming command");
-                set_current_command(&command, event, op_type, op_status, root);
-                tedge_command_print(&command);
-                root = NULL;
+                switch (op_status)
+                {
+                    case TEDGE_COMMAND_STATUS_EXECUTING:
+                        ESP_LOGI(TAG, "Resuming command");
+                        set_current_command(&command, event, op_type, op_status, root);
+                        command.status = TEDGE_COMMAND_STATUS_VERIFYING;
+                        tedge_command_print(&command);
+                        root = NULL;
+                        break;
+
+                    case TEDGE_COMMAND_STATUS_VERIFYING:
+                        ESP_LOGI(TAG, "Resuming command");
+                        set_current_command(&command, event, op_type, op_status, root);
+                        tedge_command_print(&command);
+                        root = NULL;
+                        break;
+
+                    default:
+                        break;
+                }
             }
         }
 
@@ -446,13 +487,13 @@ static void mqtt_app_start(void)
     ESP_LOGI(TAG, "Topic id: %s", TOPIC_ID);
 
     app_server_t server = {
-        .port = 1883,
+        .mqtt_port = 1883,
     };
 
     if (MANUAL_MQTT_HOST != NULL)
     {
         ESP_LOGI(TAG, "Using manual mqtt host. server=%s", MANUAL_MQTT_HOST);
-        server.host = strdup(MANUAL_MQTT_HOST);
+        server.mqtt_host = strdup(MANUAL_MQTT_HOST);
     }
 
     if (READ_FROM_NVM)
@@ -461,9 +502,9 @@ static void mqtt_app_start(void)
         err_enum_t err = read_settings(&server);
         if (err == ERR_OK)
         {
-            if (server.host != NULL)
+            if (server.mqtt_host != NULL)
             {
-                ESP_LOGI(TAG, "Read settings from NVM flash. server=%s, port=%d", server.host, server.port);
+                ESP_LOGI(TAG, "Read settings from NVM flash. server=%s, port=%d", server.mqtt_host, server.mqtt_port);
             }
             else
             {
@@ -477,12 +518,12 @@ static void mqtt_app_start(void)
     }
 
     // Retry forever waiting for a valid thin-edge.io instance is found
-    while (server.host == NULL)
+    while (server.mqtt_host == NULL)
     {
         discover_tedge_broker(&server, "_thin-edge_mqtt", "_tcp", MDNS_DISCOVER_PATTERN);
-        if (server.host != NULL)
+        if (server.mqtt_host != NULL)
         {
-            ESP_LOGI(TAG, "Using thin-edge.io. host=%s, port=%d", server.host, server.port);
+            ESP_LOGI(TAG, "Using thin-edge.io. host=%s, port=%d", server.mqtt_host, server.mqtt_port);
 
             if (SAVE_TO_NVM)
             {
@@ -505,8 +546,8 @@ static void mqtt_app_start(void)
     build_mqtt_topic(last_will_topic, "/e/disconnected");
 
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = server.host,
-        .broker.address.port = server.port,
+        .broker.address.uri = server.mqtt_host,
+        .broker.address.port = server.mqtt_port,
         .session.last_will.topic = last_will_topic,
         .session.last_will.msg = "{\"text\": \"Disconnected\"}",
         .session.last_will.qos = 1,
@@ -597,11 +638,89 @@ static void mqtt_app_start(void)
                 break;
 
             case TEDGE_COMMAND_STATUS_EXECUTING:
-                tedge_command_set_failed(command.payload, "Firmware update is not supported");
-                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
-                command.status = TEDGE_COMMAND_STATUS_FAILED;
-                break;
+                char *remote_url = cJSON_GetObjectItem(command.payload, "remoteUrl")->valuestring;
+                // NOTE: This requires thin-edge.io version >= 1.0.2~150+gdabb15e
+                char *tedge_url = cJSON_GetObjectItem(command.payload, "tedgeUrl")->valuestring;
 
+                esp_err_t err;
+                if (tedge_url != NULL)
+                {
+                    err = do_firmware_upgrade(tedge_url);
+                }
+                else if (remote_url != NULL)
+                {
+                    err = do_firmware_upgrade(remote_url);
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "Firmware operation does not include .tedgeUrl or .remoteUrl. Operation will be set to failed");
+                    err = ESP_ERR_NOT_SUPPORTED;
+                }
+
+                if (err == ESP_OK)
+                {
+                    tedge_command_set_status(command.payload, "successful");
+                    command.status = TEDGE_COMMAND_STATUS_SUCCESSFUL;
+                }
+                else
+                {
+                    tedge_command_set_failed(command.payload, "Firmware update is not supported");
+                    command.status = TEDGE_COMMAND_STATUS_FAILED;
+                }
+                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
+                break;
+            case TEDGE_COMMAND_STATUS_VERIFYING:
+                tedge_command_set_status(command.payload, "verifying");
+                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
+
+                #if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+                /**
+                 * We are treating successful WiFi connection as a checkpoint to cancel rollback
+                 * process and mark newly updated firmware image as active. For production cases,
+                 * please tune the checkpoint behavior per end application requirement.
+                 */
+                ESP_LOGI(TAG, "Checking OTA state");
+                const esp_partition_t *running = esp_ota_get_running_partition();
+                esp_ota_img_states_t ota_state;
+                esp_err_t ota_err = esp_ota_get_state_partition(running, &ota_state);
+                if (ota_err == ESP_OK)
+                {
+                    if (ota_state == ESP_OTA_IMG_PENDING_VERIFY)
+                    {
+                        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+                        {
+                            ESP_LOGI(TAG, "App is valid, rollback cancelled successfully");
+                        }
+                        else
+                        {
+                            ESP_LOGE(TAG, "Failed to cancel rollback");
+                        }
+                        tedge_command_set_status(command.payload, "successful");
+                        command.status = TEDGE_COMMAND_STATUS_SUCCESSFUL;
+                    }
+                    else
+                    {
+                        // TODO: Should the action be idempotent, e.g. should the actual and desired state be compared
+                        // and set the success/fail based on it?
+                        tedge_command_set_failed(command.payload, "OTA update is not in progress");
+                        command.status = TEDGE_COMMAND_STATUS_FAILED;
+                    }
+                }
+                else
+                {
+                    char reason[128] = {0};
+                    sprintf(reason, "OTA update is not in progress. error=%s", esp_err_to_name(ota_err));
+                    tedge_command_set_failed(command.payload, reason);
+                    command.status = TEDGE_COMMAND_STATUS_FAILED;
+                }
+                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
+                #else
+                    ESP_LOGI(TAG, "Rollback is not supported so assuming it was successful");
+                    tedge_command_set_status(command.payload, "successful");
+                    command.status = TEDGE_COMMAND_STATUS_SUCCESSFUL;
+                    publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
+                #endif
+                break;
             default:
                 break;
             }
@@ -620,7 +739,8 @@ void app_main(void)
 {
     // Initialize NVS.
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
         // 1.OTA app partition table has a smaller NVS partition size than the non-OTA
         // partition table. This size mismatch may cause NVS initialization to fail.
         // 2.NVS partition contains data in new format and cannot be recognized by this version of code.
@@ -628,11 +748,12 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
-    ESP_ERROR_CHECK( err );
+    ESP_ERROR_CHECK(err);
 
     ESP_LOGI(TAG, "Startup..");
     ESP_LOGI(TAG, "Free memory: %d bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "IDF version: %s", esp_get_idf_version());
+    ESP_LOGI(TAG, "Application version: %s", APPLICATION_VERSION);
 
     esp_log_level_set("*", ESP_LOG_INFO);
     esp_log_level_set("MQTT_CLIENT", ESP_LOG_VERBOSE);
@@ -654,23 +775,4 @@ void app_main(void)
 
     ESP_ERROR_CHECK(example_connect());
     mqtt_app_start();
-
-#if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
-    /**
-     * We are treating successful WiFi connection as a checkpoint to cancel rollback
-     * process and mark newly updated firmware image as active. For production cases,
-     * please tune the checkpoint behavior per end application requirement.
-     */
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    esp_ota_img_states_t ota_state;
-    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
-        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
-                ESP_LOGI(TAG, "App is valid, rollback cancelled successfully");
-            } else {
-                ESP_LOGE(TAG, "Failed to cancel rollback");
-            }
-        }
-    }
-#endif
 }
