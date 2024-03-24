@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "pthread.h"
+#include "esp_idf_version.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -14,6 +15,7 @@
 #include "mdns.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "cJSON.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,6 +34,7 @@
 #define CONFIG_MQTT_PORT "mqtt_port"
 
 static const char *TAG = "TEDGE";
+char APPLICATION_NAME[] = "freertos-esp32-tedge";
 char APPLICATION_VERSION[] = "1.1.1";
 
 //
@@ -53,8 +56,6 @@ bool SAVE_TO_NVM = true;
 // Internal
 char DEVICE_ID[32] = {0};
 char TOPIC_ID[256] = {0};
-char *cmd_topic;
-char *cmd_data;
 
 struct Server
 {
@@ -64,74 +65,77 @@ struct Server
 
 typedef enum
 {
-    OPSTATE_NONE = 0,
-    OPSTATE_INIT = 1,
-    OPSTATE_EXECUTING = 2,
-    OPSTATE_SUCCESSFUL = 3,
-    OPSTATE_FAILED = 4,
-} operation_state_t;
-
-// Current operation state
-operation_state_t OPERATION_STATE = OPSTATE_NONE;
+    TEDGE_OPERATION_STATUS_NONE = 0,
+    TEDGE_OPERATION_STATUS_INIT = 1,
+    TEDGE_OPERATION_STATUS_EXECUTING = 2,
+    TEDGE_OPERATION_STATUS_SUCCESSFUL = 3,
+    TEDGE_OPERATION_STATUS_FAILED = 4,
+} operation_status_t;
 
 typedef enum
 {
-    OP_NONE = 0,
-    OP_RESTART = 1,
+    TEDGE_OPERATION_NONE = 0,
+    TEDGE_OPERATION_RESTART = 1,
+    TEDGE_OPERATION_FIRMWARE_UPDATE = 2,
 } operation_t;
 
-// Current operation type
-operation_t OPERATION = OP_NONE;
-
 /*
-    Convert operation state to a human readable format
+    Convert operation status to a human readable format
 */
-const char *tedge_operation_state_to_name(operation_state_t code)
+const char *tedge_operation_status_to_name(operation_status_t code)
 {
     switch (code)
     {
-    case OPSTATE_NONE:
+    case TEDGE_OPERATION_STATUS_NONE:
         return "NONE";
-    case OPSTATE_INIT:
+    case TEDGE_OPERATION_STATUS_INIT:
         return "INIT";
-    case OPSTATE_EXECUTING:
+    case TEDGE_OPERATION_STATUS_EXECUTING:
         return "EXECUTING";
-    case OPSTATE_SUCCESSFUL:
+    case TEDGE_OPERATION_STATUS_SUCCESSFUL:
         return "SUCCESSFUL";
-    case OPSTATE_FAILED:
+    case TEDGE_OPERATION_STATUS_FAILED:
         return "FAILED";
     }
     return "NONE";
 }
 
-operation_t detect_operation_type(char *topic)
+operation_t get_operation_type(char *topic)
 {
-    if (strstr(cmd_topic, "cmd/restart") != NULL)
+    if (strstr(topic, "/cmd/restart/") != NULL)
     {
-        return OP_RESTART;
+        return TEDGE_OPERATION_RESTART;
     }
-    return OP_NONE;
+    if (strstr(topic, "/cmd/firmware_update/") != NULL)
+    {
+        return TEDGE_OPERATION_FIRMWARE_UPDATE;
+    }
+    return TEDGE_OPERATION_NONE;
 }
 
-operation_state_t detect_operation_state(char *message)
+operation_status_t get_operation_status(cJSON *root)
 {
-    if (strstr(message, "init") != NULL)
+    cJSON *statusObj = cJSON_GetObjectItem(root, "status");
+    char *statusStr = statusObj->valuestring;
+    operation_status_t status = TEDGE_OPERATION_STATUS_NONE;
+
+    if (strcmp(statusStr, "init") == 0)
     {
-        return OPSTATE_INIT;
+        status = TEDGE_OPERATION_STATUS_INIT;
     }
-    if (strstr(message, "executing") != NULL)
+    else if (strcmp(statusStr, "executing") == 0)
     {
-        return OPSTATE_EXECUTING;
+        return TEDGE_OPERATION_STATUS_EXECUTING;
     }
-    if (strstr(message, "successful") != NULL)
+    else if (strcmp(statusStr, "successful") == 0)
     {
-        return OPSTATE_SUCCESSFUL;
+        return TEDGE_OPERATION_STATUS_SUCCESSFUL;
     }
-    if (strstr(message, "failed") != NULL)
+    else if (strcmp(statusStr, "failed") == 0)
     {
-        return OPSTATE_FAILED;
+        return TEDGE_OPERATION_STATUS_FAILED;
     }
-    return OPSTATE_NONE;
+    return status;
 }
 
 /*
@@ -141,11 +145,81 @@ const char *tedge_operation_to_name(operation_t code)
 {
     switch (code)
     {
-    case OP_RESTART:
+    case TEDGE_OPERATION_RESTART:
         return "RESTART";
+    case TEDGE_OPERATION_FIRMWARE_UPDATE:
+        return "FIRMWARE_UPDATE";
     default:
         return "NONE";
     }
+}
+
+char *get_command_id(char *topic)
+{
+    int end = (int)strlen(topic);
+    int x = 0;
+    char sep = '/';
+    for (x = end; x >= 0; --x)
+    {
+        if (topic[x] == sep)
+        {
+            char *value = calloc(64, sizeof(char));
+            strcpy(value, topic + x + 1);
+            return value;
+        }
+    }
+    return NULL;
+}
+
+typedef struct Command
+{
+    cJSON *payload;
+    char *id;
+    operation_status_t status;
+    operation_t op_type;
+    char *topic;
+} command_t;
+
+command_t command;
+
+/*
+    Free memory used by a command
+*/
+void tedge_free_command(command_t *cmd)
+{
+    ESP_LOGD(TAG, "Freeing command memory");
+    if (cmd->payload != NULL)
+    {
+        cJSON_free(cmd->payload);
+        cmd->payload = NULL;
+    }
+    if (cmd->id != NULL)
+    {
+        free(cmd->id);
+        cmd->id = NULL;
+    }
+    if (cmd->topic != NULL)
+    {
+        free(cmd->topic);
+        cmd->topic = NULL;
+    }
+
+    cmd->status = TEDGE_OPERATION_STATUS_NONE;
+    cmd->op_type = TEDGE_OPERATION_NONE;
+}
+
+/*
+    Print command details
+*/
+void print_command(command_t *cmd)
+{
+    printf("------------------------- command -------------------------\n");
+    printf("TOPIC:     %s\n", cmd->topic);
+    printf("ID:        %s\n", cmd->id);
+    printf("STATUS:    %s\n", tedge_operation_status_to_name(cmd->status));
+    char *payload = cJSON_Print(cmd->payload);
+    printf("PAYLOAD:   %s\n", payload);
+    free(payload);
 }
 
 /*
@@ -173,6 +247,47 @@ int publish_mqtt_message(esp_mqtt_client_handle_t client, const char *topic, con
     int msg_id = esp_mqtt_client_publish(client, full_topic, data, len, qos, retain);
     ESP_LOGD(TAG, "sent publish successful, msg_id=%d", msg_id);
     return msg_id;
+}
+
+/*
+    Publish MQTT message in a JSON format
+*/
+int publish_mqtt_json(esp_mqtt_client_handle_t client, const char *topic, cJSON *data, int len, int qos, int retain)
+{
+    char full_topic[256] = {0};
+    strcat(full_topic, TOPIC_ID);
+    strcat(full_topic, topic);
+
+    char *payload = cJSON_PrintUnformatted(data);
+    ESP_LOGI(TAG, "Publishing message. topic=%s, data=%s", full_topic, data);
+    int msg_id = esp_mqtt_client_publish(client, full_topic, payload, len, qos, retain);
+    free(payload);
+    ESP_LOGD(TAG, "sent publish successful, msg_id=%d", msg_id);
+    return msg_id;
+}
+
+/*
+    Set the command status
+*/
+void set_command_status(cJSON *payload, char *status)
+{
+    cJSON_SetValuestring(cJSON_GetObjectItem(payload, "status"), status);
+}
+
+/*
+    Set command to failed and add a failure reason
+*/
+void set_command_failed(cJSON *payload, char *reason)
+{
+    set_command_status(payload, "failed");
+    if (cJSON_HasObjectItem(payload, "reason"))
+    {
+        cJSON_SetValuestring(cJSON_GetObjectItem(payload, "reason"), reason);
+    }
+    else
+    {
+        cJSON_AddStringToObject(payload, "reason", reason);
+    }
 }
 
 /*
@@ -353,6 +468,17 @@ esp_err_t save_settings(struct Server *mqtt_server)
     return ESP_OK;
 }
 
+void set_current_command(command_t *cmd, esp_mqtt_event_handle_t event, operation_t op_type, operation_status_t op_status, cJSON *root)
+{
+    int id_len = strlen(TOPIC_ID);
+    char *topic = strndup(event->topic + id_len, event->topic_len - id_len);
+    cmd->id = get_command_id(topic);
+    cmd->payload = root;
+    cmd->topic = topic;
+    cmd->status = op_status;
+    cmd->op_type = op_type;
+}
+
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 {
 
@@ -372,11 +498,16 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 
         // Publish device info
         char hardware_info[256] = {0};
-        sprintf(hardware_info, "{\"model\":\"esp32-WROOM-32\",\"revision\":\"esp32\",\"serialNumber\":\"%s\"}", DEVICE_ID);
+        sprintf(hardware_info, "{\"model\":\"esp32-WROOM-32\",\"revision\":\"idf-%s\",\"serialNumber\":\"%s\"}", esp_get_idf_version(), DEVICE_ID);
         publish_mqtt_message(client, "/twin/c8y_Hardware", hardware_info, 0, 1, 1);
+
+        char firmware_message[256] = {0};
+        sprintf(firmware_message, "{\"name\":\"%s\",\"version\":\"%s\"}", APPLICATION_NAME, APPLICATION_VERSION);
+        publish_mqtt_message(client, "/twin/firmware", firmware_message, 0, 1, 1);
 
         // Register capabilities
         publish_mqtt_message(client, "/cmd/restart", "{}", 0, 1, 1);
+        publish_mqtt_message(client, "/cmd/firmware_update", "{}", 0, 1, 1);
 
         // Publish boot event
         char boot_message[256] = {0};
@@ -405,62 +536,55 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
         ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
         ESP_LOGI(TAG, "DATA=%.*s (len %d)", event->data_len, event->data, event->data_len);
-        if ((event->data_len) > 0)
+
+        if ((event->data_len) == 0)
         {
-            if (cmd_topic != NULL)
+            ESP_LOGI(TAG, "Payload is empty");
+            break;
+        }
+
+        // Operation
+        cJSON *root = cJSON_Parse(event->data);
+        operation_t op_type = get_operation_type(event->topic);
+        operation_status_t op_status = get_operation_status(root);
+
+        if (op_status == TEDGE_OPERATION_STATUS_INIT)
+        {
+            if (command.op_type == TEDGE_OPERATION_NONE)
             {
-                free(cmd_topic);
-                cmd_topic = NULL;
-            }
-            if (cmd_data != NULL)
-            {
-                free(cmd_data);
-                cmd_data = NULL;
-            }
-            if (strnstr(event->topic, TOPIC_ID, event->topic_len) != NULL)
-            {
-                int topic_len = strlen(TOPIC_ID);
-                cmd_topic = strndup(event->topic + topic_len, event->topic_len - topic_len);
+                // New operation and none are in progress
+                set_current_command(&command, event, op_type, op_status, root);
+                print_command(&command);
+                root = NULL;
             }
             else
             {
-                cmd_topic = strndup(event->topic, event->topic_len);
-            }
-            cmd_data = strndup(event->data, event->data_len);
-            ESP_LOGI(TAG, "COMMAND_TOPIC=%s", cmd_topic);
-            ESP_LOGI(TAG, "COMMAND_DATA=%s", cmd_data);
-
-            // Set active operation if not already set
-            operation_t op_type = detect_operation_type(cmd_topic);
-            operation_state_t op_state = detect_operation_state(cmd_data);
-
-            if (OPERATION == OP_NONE)
-            {
-                OPERATION = op_type;
-            }
-
-            // Ignore operations for other operation types whilst an operation
-            // is already in progress
-            if (OPERATION != OP_NONE)
-            {
-                if (OPERATION == op_type)
-                {
-                    if (op_state != OPSTATE_NONE)
-                    {
-                        OPERATION_STATE = op_state;
-                    }
-                    ESP_LOGI(TAG, "Current operation: %s (%s)", tedge_operation_to_name(OPERATION), tedge_operation_state_to_name(OPERATION_STATE));
-                }
-                else
-                {
-                    // TODO: Queue operation instead of ignoring it
-                    ESP_LOGI(TAG, "TODO: Ignoring operation as an operation is already in progress: %s (%s)", tedge_operation_to_name(op_type), tedge_operation_state_to_name(op_state));
-                }
+                // TODO: Queue operations if an operation is already in progress
+                ESP_LOGI(TAG, "TODO: Ignoring new operation as an operation is already in progress: %s (%s)", tedge_operation_to_name(op_type), tedge_operation_status_to_name(op_status));
             }
         }
-        else
+        else if (command.op_type == TEDGE_OPERATION_NONE)
         {
-            ESP_LOGI(TAG, "Payload is empty");
+            // Check if it is a resuming operation
+            if (op_type == TEDGE_OPERATION_RESTART && op_status == TEDGE_OPERATION_STATUS_EXECUTING)
+            {
+                ESP_LOGI(TAG, "Resuming command");
+                set_current_command(&command, event, op_type, op_status, root);
+                print_command(&command);
+                root = NULL;
+            }
+            else if (op_type == TEDGE_OPERATION_FIRMWARE_UPDATE && op_status == TEDGE_OPERATION_STATUS_EXECUTING)
+            {
+                ESP_LOGI(TAG, "Resuming command");
+                set_current_command(&command, event, op_type, op_status, root);
+                print_command(&command);
+                root = NULL;
+            }
+        }
+
+        if (root != NULL)
+        {
+            cJSON_free(root);
         }
         break;
     case MQTT_EVENT_ERROR:
@@ -603,38 +727,59 @@ static void mqtt_app_start(void)
         publish_mqtt_message(client, "/m/environment", temp_payload, 0, 0, 0);
         sleep(5);
 
-        if (OPERATION == OP_RESTART)
+        if (command.op_type == TEDGE_OPERATION_RESTART)
         {
-            if (OPERATION_STATE == OPSTATE_INIT)
+            switch (command.status)
             {
+            case TEDGE_OPERATION_STATUS_INIT:
                 publish_mqtt_message(client, "/a/restart", "{\"text\": \"Device will be restarted\",\"severity\": \"critical\"}", 0, 1, 1);
-                publish_mqtt_message(client, cmd_topic, "{\"status\": \"executing\"}", 0, 1, 1);
+                set_command_status(command.payload, "executing");
+                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
                 sleep(5);
                 esp_restart();
-            }
-            else if (OPERATION_STATE == OPSTATE_EXECUTING)
-            {
+                break;
+
+            case TEDGE_OPERATION_STATUS_EXECUTING:
                 ESP_LOGI(TAG, "Will create event!!!");
                 publish_mqtt_message(client, "/e/restart", "{\"text\": \"Device restarted\"}", 0, 0, 0);
                 publish_mqtt_message(client, "/a/restart", "", 0, 2, 1);
                 sleep(3);
-                publish_mqtt_message(client, cmd_topic, "{\"status\": \"successful\"}", 0, 1, 1);
-
-                if (cmd_topic != NULL)
-                {
-                    free(cmd_topic);
-                    cmd_topic = NULL;
-                }
-                OPERATION_STATE = OPSTATE_NONE;
-                OPERATION = OP_RESTART;
-                if (cmd_data != NULL)
-                {
-                    free(cmd_data);
-                    cmd_data = NULL;
-                }
-                ESP_LOGI(TAG, "Data cleared.");
+                set_command_status(command.payload, "successful");
+                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
                 sleep(5);
+                command.status = TEDGE_OPERATION_STATUS_SUCCESSFUL;
+                break;
+
+            default:
+                break;
             }
+        }
+        else if (command.op_type == TEDGE_OPERATION_FIRMWARE_UPDATE)
+        {
+            switch (command.status)
+            {
+            case TEDGE_OPERATION_STATUS_INIT:
+                set_command_status(command.payload, "executing");
+                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
+                command.status = TEDGE_OPERATION_STATUS_EXECUTING;
+                break;
+
+            case TEDGE_OPERATION_STATUS_EXECUTING:
+                set_command_failed(command.payload, "Firmware update is not supported");
+                publish_mqtt_json(client, command.topic, command.payload, 0, 1, 1);
+                command.status = TEDGE_OPERATION_STATUS_FAILED;
+                break;
+
+            default:
+                break;
+            }
+        }
+
+        // Clear current operation
+        if (command.status == TEDGE_OPERATION_STATUS_SUCCESSFUL || command.status == TEDGE_OPERATION_STATUS_FAILED)
+        {
+            tedge_free_command(&command);
+            ESP_LOGI(TAG, "Cleared command");
         }
     }
 }
