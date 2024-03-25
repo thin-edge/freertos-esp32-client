@@ -16,6 +16,8 @@ const char *tedge_tedge_command_status_to_name(tedge_command_status_t code)
         return "INIT";
     case TEDGE_COMMAND_STATUS_EXECUTING:
         return "EXECUTING";
+    case TEDGE_COMMAND_STATUS_VERIFYING:
+        return "VERIFYING";
     case TEDGE_COMMAND_STATUS_SUCCESSFUL:
         return "SUCCESSFUL";
     case TEDGE_COMMAND_STATUS_FAILED:
@@ -50,6 +52,10 @@ tedge_command_status_t tedge_command_get_status(cJSON *root)
     else if (strcmp(statusStr, "executing") == 0)
     {
         return TEDGE_COMMAND_STATUS_EXECUTING;
+    }
+    else if (strcmp(statusStr, "verifying") == 0)
+    {
+        return TEDGE_COMMAND_STATUS_VERIFYING;
     }
     else if (strcmp(statusStr, "successful") == 0)
     {

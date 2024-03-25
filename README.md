@@ -110,3 +110,31 @@ idf.py reconfigure
 idf.py build
 ```
 
+## Firmware updates
+
+To support testing firmware updates you will need to build two versions of the same application.
+
+1. Create a firmware entry in Cumulocity IoT (you only need to do this once for the tenant)
+
+   ```sh
+   c8y firmware get --id esp32-tedge || c8y firmware create --name "esp32-tedge"
+   ```
+
+2. Build the first version of the application and upload it (assuming the current version is "1.1.0")
+
+   ```sh
+   idf.py build
+   c8y firmware versions create --firmware esp32-tedge --version "1.1.0" --file ./build/freertos-esp32-client.bin
+   ```
+
+3. You should also flash the version to the esp32 microcontroller
+
+4. Build a new version, but edit the `APPLICATION_VERSION` and set to a new version, e.g. `1.2.0`
+
+   ```sh
+   idf.py build
+   c8y firmware versions create --firmware esp32-tedge --version "1.2.0" --file ./build/freertos-esp32-client.bin
+   ```
+
+5. In Cumulocity IoT, you can now trigger a firmware update using the `esp32-tedge` firmware name
+
