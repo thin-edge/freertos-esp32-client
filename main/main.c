@@ -155,7 +155,7 @@ esp_err_t do_firmware_upgrade(char *url)
 */
 static const char *ip_protocol_str[] = {"V4", "V6", "MAX"};
 
-static mdns_result_t *mdns_find_match(mdns_result_t *results, const char *pattern)
+static mdns_result_t *mdns_find_match(mdns_result_t *results, char *pattern)
 {
     mdns_result_t *r = results;
     mdns_ip_addr_t *a = NULL;
@@ -198,7 +198,7 @@ static mdns_result_t *mdns_find_match(mdns_result_t *results, const char *patter
             a = a->next;
         }
 
-        if (r != NULL && pattern != NULL && strstr(r->hostname, pattern) != NULL)
+        if (r != NULL && (pattern == NULL || (pattern != NULL && strstr(r->hostname, pattern) != NULL)))
         {
             ESP_LOGI(TAG, "Selecting first match. host=%s, port=%d", r->hostname, r->port);
             return r;
@@ -209,7 +209,7 @@ static mdns_result_t *mdns_find_match(mdns_result_t *results, const char *patter
     return NULL;
 }
 
-void discover_tedge_broker(app_server_t *server, const char *service_name, const char *proto, const char *pattern)
+void discover_tedge_broker(app_server_t *server, const char *service_name, const char *proto, char *pattern)
 {
     ESP_LOGI(TAG, "Query PTR: %s.%s.local", service_name, proto);
 
