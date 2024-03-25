@@ -47,6 +47,7 @@ char APPLICATION_VERSION[] = "1.1.0";
 // Discover settings
 //
 // Manually set the host (only recommended if you are not running thin-edge.io with mdns enabled)
+// Example value: mqtt://rpi5-abcdef.local
 const char *MANUAL_MQTT_HOST = NULL;
 
 // Match the first service matching the given pattern
@@ -494,6 +495,17 @@ static void mqtt_app_start(void)
     {
         ESP_LOGI(TAG, "Using manual mqtt host. server=%s", MANUAL_MQTT_HOST);
         server.mqtt_host = strdup(MANUAL_MQTT_HOST);
+
+        if (SAVE_TO_NVM)
+        {
+            // Save manual MQTT host to NVM so that firmware updates don't have to have a hardcoded value
+            ESP_LOGI(TAG, "Saving settings to NVM flash");
+            esp_err_t err = save_settings(&server);
+            if (err != ERR_OK)
+            {
+                ESP_LOGW(TAG, "Failed to save settings to NVM flash. err=%s", esp_err_to_name(err));
+            }
+        }
     }
 
     if (READ_FROM_NVM)
