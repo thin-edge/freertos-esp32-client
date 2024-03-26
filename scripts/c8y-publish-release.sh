@@ -10,6 +10,8 @@
 
 set -e
 
+UPLOAD_AS_BINARY=1
+
 help() {
     cat << EOT
 Publish github releases
@@ -84,7 +86,16 @@ publish_version() {
         fi
         # create version if it does not already exist
         if ! c8y firmware versions get -n --firmware "$NAME" --id "$VERSION" >/dev/null 2>&1; then
-            c8y firmware versions create -n --firmware "$NAME" --version "$VERSION" --url "$url" --force
+            if [ "$UPLOAD_AS_BINARY" = "1" ]; then
+                echo "Downloading the artifact before uploading it as a binary. url=$url" >&2
+                temp_file="./$filename"
+                curl -Lf -o "$temp_file"  "$url"
+                c8y firmware versions create -n --firmware "$NAME" --version "$VERSION" --file "$temp_file" --force
+                rm "$temp_file"
+            else
+                echo "Creating firmware version from url" >&2
+                c8y firmware versions create -n --firmware "$NAME" --version "$VERSION" --url "$url" --force
+            fi
         else
             echo "Version already exists. firmware=$NAME, version=$VERSION, url=$url" >&2
         fi
