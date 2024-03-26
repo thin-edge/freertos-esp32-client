@@ -65,7 +65,7 @@ TAG="$1"
 publish_version() {
     url="$1"
     filename=$(basename "$url")
-    VERSION=$(echo "$filename" | sed 's/.img.xz$//' | rev | cut -d_ -f1 | rev)
+    VERSION=$(echo "$filename" | sed 's/.bin$//' | rev | cut -d_ -f1 | rev)
     NAME=$(echo "$filename" | rev | cut -d_ -f2- | rev)
     DEVICE_TYPE=$NAME
     #echo "name=$NAME, version=$VERSION, url=$url" >&2
@@ -126,7 +126,7 @@ if [ "$PRE_RELEASE" = 1 ]; then
     fi
 fi
 # Get assets from given tag
-FILES=$(gh release view "$TAG" --json assets --jq '.assets[].url' | grep ".xz")
+FILES=$(gh release view "$TAG" --json assets --jq '.assets[].url' | grep ".bin")
 
 # publish each version found
 for file in $FILES; do
