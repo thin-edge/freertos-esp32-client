@@ -11,6 +11,7 @@ The following features are supported by the client.
 * [x] Restart device
 * [x] Send measurements periodically
 
+The sequence diagrams for the command can be found under [./docs/COMMANDS.md](./docs/COMMANDS.md).
 
 ## Requirements 
 
