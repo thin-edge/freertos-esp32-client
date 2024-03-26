@@ -40,8 +40,6 @@
 #define CONFIG_MQTT_PORT "mqtt_port"
 
 static const char *TAG = "TEDGE";
-char APPLICATION_NAME[] = "freertos-esp32-tedge";
-char APPLICATION_VERSION[] = "1.1.0";
 
 //
 // Discover settings
@@ -343,6 +341,9 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 
+        // Get application meta data
+        const esp_app_desc_t *app_desc = esp_app_get_description();
+
         // Register device
         char reg_message[256] = {0};
         sprintf(reg_message, "{\"name\":\"%s\",\"type\":\"ESP-IDF\",\"@type\":\"child-device\"}", DEVICE_ID);
@@ -353,8 +354,9 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         sprintf(hardware_info, "{\"model\":\"esp32-WROOM-32\",\"revision\":\"idf-%s\",\"serialNumber\":\"%s\"}", esp_get_idf_version(), DEVICE_ID);
         publish_mqtt_message(client, "/twin/c8y_Hardware", hardware_info, 0, 1, 1);
 
+        // Get firmware information
         char firmware_message[256] = {0};
-        sprintf(firmware_message, "{\"name\":\"%s\",\"version\":\"%s\"}", APPLICATION_NAME, APPLICATION_VERSION);
+        sprintf(firmware_message, "{\"name\":\"%s\",\"version\":\"%s\"}", app_desc->project_name, app_desc->version);
         publish_mqtt_message(client, "/twin/firmware", firmware_message, 0, 1, 1);
 
         // Register capabilities
@@ -363,7 +365,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 
         // Publish boot event
         char boot_message[256] = {0};
-        sprintf(boot_message, "{\"text\":\"Application started. version=%s\",\"version\":\"%s\"}", APPLICATION_VERSION, APPLICATION_VERSION);
+        sprintf(boot_message, "{\"text\":\"Application started. version=%s\",\"version\":\"%s\"}", app_desc->version, app_desc->version);
         publish_mqtt_message(client, "/e/boot", boot_message, 0, 1, 0);
 
         // Subscribe to commands
@@ -765,7 +767,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Startup..");
     ESP_LOGI(TAG, "Free memory: %d bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "IDF version: %s", esp_get_idf_version());
-    ESP_LOGI(TAG, "Application version: %s", APPLICATION_VERSION);
+    ESP_LOGI(TAG, "Application version: %s", esp_app_get_description()->version);
 
     esp_log_level_set("*", ESP_LOG_INFO);
     esp_log_level_set("MQTT_CLIENT", ESP_LOG_VERBOSE);
