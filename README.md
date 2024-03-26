@@ -150,7 +150,7 @@ To support testing firmware updates you will need to build two versions of the s
 
 3. You should also flash the version to the esp32 microcontroller
 
-4. Build a new version, but edit the `APPLICATION_VERSION` and set to a new version, e.g. `1.2.0`
+4. Build a new version, by doing a new git commit
 
    ```sh
    idf.py build
