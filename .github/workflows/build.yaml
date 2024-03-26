@@ -1,3 +1,4 @@
+name: build
 permissions:
   contents: write
 on:
