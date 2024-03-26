@@ -3,13 +3,33 @@
 This is a thin-edge.io child device client that can run on esp32 microcontrollers. 
 It based on the [ESP-MQTT sample application](https://github.com/espressif/esp-idf/tree/v5.2.1/examples/protocols/mqtt/tcp).
 
+## Features
+
+The following features are supported by the client.
+
+* [x] Firmware Over the Air (OTA) updates
+* [x] Restart device
+* [x] Send measurements periodically
+
+
 ## Requirements 
 
 ### Hardware
 
-- ESP32 Board supported Wi-Fi connectivity
+- ESP32 Board with Wi-Fi connectivity (with at least 4MB Flash)
 - Raspberry Pi with [thin-edge.io](https://thin-edge.io) deployed 
 - Router
+
+**Notes**
+
+* At least 4MB of Flash is required as the Firmware OTA update requires at least 2 application slots to ensure robust updates
+
+#### Example devices
+
+* diymore ESP32 USB C ESP32 NodeMCU Development board ESP32 WROOM 32 2.4 GHz WLAN WiFi Bluetooth CP2102 Chip
+   * Processor: ESP32-WROOM-32 (4MB Flash)
+* diymore ESP32 CAM Development board ESP32 USB C, WLAN/Bluetooth, ESP32 DC 5V Dual-Core Development board with 2640 Camera Module
+   * Processor: ESP32-S (8MB Flash)
 
 ### Setting up the thin-edge.io device
 
