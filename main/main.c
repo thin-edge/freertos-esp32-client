@@ -41,12 +41,20 @@
 
 static const char *TAG = "TEDGE";
 
+
+extern const uint8_t client_cert_pem_start[] asm("_binary_client_crt_start");
+extern const uint8_t client_cert_pem_end[] asm("_binary_client_crt_end");
+extern const uint8_t client_key_pem_start[] asm("_binary_client_key_start");
+extern const uint8_t client_key_pem_end[] asm("_binary_client_key_end");
+
 //
 // Discover settings
 //
-// Manually set the host (only recommended if you are not running thin-edge.io with mdns enabled)
+// Manually set the host and port (only recommended if you are not running thin-edge.io with mdns enabled)
 // Example value: mqtt://rpi5-abcdef.local
+// TLS example value: mqtts://rpi5-abcdef.local, port: 8883
 const char *MANUAL_MQTT_HOST = NULL;
+const int *MANUAL_MQTT_PORT = NULL;
 
 // Match the first service matching the given pattern
 char *MDNS_DISCOVER_PATTERN = NULL;
@@ -497,7 +505,11 @@ static void mqtt_app_start(void)
     {
         ESP_LOGI(TAG, "Using manual mqtt host. server=%s", MANUAL_MQTT_HOST);
         server.mqtt_host = strdup(MANUAL_MQTT_HOST);
-
+        if (MANUAL_MQTT_PORT == 8883)
+        {
+            server.mqtt_port = 8883;
+        }
+        
         if (SAVE_TO_NVM)
         {
             // Save manual MQTT host to NVM so that firmware updates don't have to have a hardcoded value
@@ -566,6 +578,17 @@ static void mqtt_app_start(void)
         .session.last_will.msg = "{\"text\": \"Disconnected\"}",
         .session.last_will.qos = 1,
         .session.last_will.retain = false};
+    if (mqtt_cfg.broker.address.port == 8883)
+    {
+        mqtt_cfg.credentials.authentication.certificate= (const char *)client_cert_pem_start;
+        mqtt_cfg.credentials.authentication.key = (const char *)client_key_pem_start;
+
+    }
+    else
+    {
+        mqtt_cfg.credentials.authentication.certificate= NULL;
+        mqtt_cfg.credentials.authentication.key = NULL;
+    }
 #if CONFIG_BROKER_URL_FROM_STDIN
     char line[128];
 
