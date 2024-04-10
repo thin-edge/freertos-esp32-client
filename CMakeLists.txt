@@ -8,3 +8,6 @@ set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/examples/common_components/protocol_exam
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(freertos-esp32-client)
+
+target_add_binary_data(${CMAKE_PROJECT_NAME}.elf "main/client.crt" TEXT)
+target_add_binary_data(${CMAKE_PROJECT_NAME}.elf "main/client.key" TEXT)

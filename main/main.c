@@ -41,12 +41,20 @@
 
 static const char *TAG = "TEDGE";
 
+
+extern const uint8_t client_cert_pem_start[] asm("_binary_client_crt_start");
+extern const uint8_t client_cert_pem_end[] asm("_binary_client_crt_end");
+extern const uint8_t client_key_pem_start[] asm("_binary_client_key_start");
+extern const uint8_t client_key_pem_end[] asm("_binary_client_key_end");
+
 //
 // Discover settings
 //
-// Manually set the host (only recommended if you are not running thin-edge.io with mdns enabled)
+// Manually set the host and port (only recommended if you are not running thin-edge.io with mdns enabled)
 // Example value: mqtt://rpi5-abcdef.local
+// TLS example value: mqtts://rpi5-abcdef.local, port: 8883
 const char *MANUAL_MQTT_HOST = NULL;
+const int *MANUAL_MQTT_PORT = NULL;
 
 // Match the first service matching the given pattern
 char *MDNS_DISCOVER_PATTERN = NULL;
@@ -480,6 +488,49 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     mqtt_event_handler_cb(event_data);
 }
 
+int retry_num=0;
+static void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id,void *event_data){
+if(event_id == WIFI_EVENT_STA_START)
+{
+  printf("WIFI CONNECTING....\n");
+}
+else if (event_id == WIFI_EVENT_STA_CONNECTED)
+{
+  printf("WiFi CONNECTED\n");
+}
+else if (event_id == WIFI_EVENT_STA_DISCONNECTED)
+{
+  printf("WiFi lost connection\n");
+  if(retry_num<5){esp_wifi_connect();retry_num++;printf("Retrying to Connect...\n");}
+}
+else if (event_id == IP_EVENT_STA_GOT_IP)
+{
+  printf("Wifi got IP...\n\n");
+}
+}
+
+void wifi_connection(){
+    esp_netif_init(); //network interdace initialization
+    esp_event_loop_create_default(); //responsible for handling and dispatching events
+    esp_netif_create_default_wifi_sta(); //sets up necessary data structs for wifi station interface
+    wifi_init_config_t wifi_initiation = WIFI_INIT_CONFIG_DEFAULT();//sets up wifi wifi_init_config struct with default values
+    esp_wifi_init(&wifi_initiation); //wifi initialised with dafault wifi_initiation
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);//creating event handler register for wifi
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);//creating event handler register for ip event
+    wifi_config_t wifi_configuration;
+    esp_wifi_get_config(ESP_IF_WIFI_STA, &wifi_configuration);
+
+    if(strlen(&wifi_configuration.sta.ssid) == 0 || strlen(&wifi_configuration.sta.password) == 0) {
+        strcpy((char*)wifi_configuration.sta.ssid, CONFIG_EXAMPLE_WIFI_SSID); // copy chars from hardcoded configs to struct
+        strcpy((char*)wifi_configuration.sta.password, CONFIG_EXAMPLE_WIFI_PASSWORD);
+        esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    } 
+    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_configuration);//setting up configs when event ESP_IF_WIFI_STA
+    esp_wifi_start();//start connection with configurations provided in funtion
+    esp_wifi_set_mode(WIFI_MODE_STA);//station mode selected
+    esp_wifi_connect(); //connect with saved ssid and pass
+}   
+
 static void mqtt_app_start(void)
 {
     // Use mdns to discover which local thin-edge.io to connect to
@@ -497,7 +548,11 @@ static void mqtt_app_start(void)
     {
         ESP_LOGI(TAG, "Using manual mqtt host. server=%s", MANUAL_MQTT_HOST);
         server.mqtt_host = strdup(MANUAL_MQTT_HOST);
-
+        if (MANUAL_MQTT_PORT == 8883)
+        {
+            server.mqtt_port = 8883;
+        }
+        
         if (SAVE_TO_NVM)
         {
             // Save manual MQTT host to NVM so that firmware updates don't have to have a hardcoded value
@@ -566,6 +621,17 @@ static void mqtt_app_start(void)
         .session.last_will.msg = "{\"text\": \"Disconnected\"}",
         .session.last_will.qos = 1,
         .session.last_will.retain = false};
+    if (mqtt_cfg.broker.address.port == 8883)
+    {
+        mqtt_cfg.credentials.authentication.certificate= (const char *)client_cert_pem_start;
+        mqtt_cfg.credentials.authentication.key = (const char *)client_key_pem_start;
+
+    }
+    else
+    {
+        mqtt_cfg.credentials.authentication.certificate= NULL;
+        mqtt_cfg.credentials.authentication.key = NULL;
+    }
 #if CONFIG_BROKER_URL_FROM_STDIN
     char line[128];
 
@@ -787,6 +853,9 @@ void app_main(void)
      */
     tedge_banner();
 
-    ESP_ERROR_CHECK(example_connect());
+    // ESP_ERROR_CHECK(example_connect());
+    nvs_flash_init();
+    wifi_connection();
+
     mqtt_app_start();
 }
